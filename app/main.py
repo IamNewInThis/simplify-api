@@ -1,5 +1,6 @@
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
+from app.api import scraping
 
 app = FastAPI(
     title="Simplify API",
@@ -15,6 +16,9 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+# Incluir routers
+app.include_router(scraping.router, prefix="/api", tags=["scraping"])
 
 
 @app.get("/")
