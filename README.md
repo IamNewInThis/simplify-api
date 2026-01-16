@@ -63,12 +63,12 @@ cp .env.example .env
 ### 4. Ejecutar el servidor
 
 ```bash
-uvicorn app.main:app --reload
+uvicorn app.main:app --reload --host 0.0.0.0 --port 8080
 ```
 
-El servidor estará disponible en: `http://localhost:8000`
+El servidor estará disponible en: `http://localhost:8080`
 
-Documentación interactiva: `http://localhost:8000/docs`
+Documentación interactiva: `http://localhost:8080/docs`
 
 ## 📦 Gestión de Dependencias
 
