@@ -106,7 +106,7 @@ source venv/bin/activate
 ### Ejecutar en modo desarrollo
 
 ```bash
-uvicorn app.main:app --reload --host 0.0.0.0 --port 8000
+uvicorn app.main:app --reload --host 0.0.0.0 --port 8080
 ```
 
 ### Desactivar entorno virtual
