@@ -5,6 +5,8 @@ from fastapi import APIRouter, Depends, HTTPException, status, Query
 from sqlalchemy.orm import Session, joinedload
 from typing import List, Optional
 from uuid import UUID
+import sys
+import os
 
 from app.core.database import get_db
 from app.models.brand import Brand
@@ -12,6 +14,44 @@ from app.models.manufacturer import Manufacturer
 from app.schemas.brand import BrandCreate, BrandUpdate, BrandResponse, BrandWithManufacturer
 
 router = APIRouter()
+
+
+@router.get("/brands/search")
+async def search_brand_catalog(
+    q: str = Query(..., description="Nombre de la marca a buscar"),
+    db: Session = Depends(get_db)
+):
+    """
+    Busca productos de una marca en Jumbo.cl
+
+    Por ahora solo navega a Jumbo y realiza la búsqueda.
+    En futuras iteraciones extraerá la lista de productos.
+
+    Args:
+        q: Nombre de la marca (ej: "Soprole", "Nestle")
+
+    Returns:
+        dict: Estado del scraping y mensaje
+    """
+    print(f"\n=== BÚSQUEDA DE CATÁLOGO POR MARCA ===")
+    print(f"Marca: {q}")
+
+    # Importar el scraper de Jumbo
+    scraper_path = os.path.abspath(
+        os.path.join(os.path.dirname(__file__), '../../../simplify-scraper')
+    )
+    if scraper_path not in sys.path:
+        sys.path.append(scraper_path)
+
+    from scrapers.jumbo_catalog import scrape_jumbo_catalog
+
+    # Ejecutar scraping
+    result = await scrape_jumbo_catalog(q)
+
+    print(f"Resultado: {result['status']}")
+    print(f"================================\n")
+
+    return result
 
 
 @router.get("/brands", response_model=List[BrandResponse])
