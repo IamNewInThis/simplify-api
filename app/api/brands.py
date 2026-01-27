@@ -3,35 +3,123 @@ Brands API endpoints
 """
 from fastapi import APIRouter, Depends, HTTPException, status, Query
 from sqlalchemy.orm import Session, joinedload
-from typing import List, Optional
+from sqlalchemy import func
+from typing import List, Optional, Dict
 from uuid import UUID
 import sys
 import os
+import re
 
 from app.core.database import get_db
 from app.models.brand import Brand
 from app.models.manufacturer import Manufacturer
+from app.models.product_catalog import ProductCatalog
+from app.models.category import Category
 from app.schemas.brand import BrandCreate, BrandUpdate, BrandResponse, BrandWithManufacturer
 
 router = APIRouter()
 
 
+# Mapeo de palabras clave a categorías (nombres en inglés para BD)
+# Formato: 'Nombre Categoría BD': ['palabras', 'clave', 'en', 'español']
+CATEGORY_KEYWORDS = {
+    'Yogurt': ['yogurt', 'yoghurt', 'yogur'],
+    'Milk': ['leche'],
+    'Cheese': ['queso'],
+    'Butter & Margarine': ['mantequilla'],
+    'Desserts': ['postre', 'flan', 'manjarate', 'sémola', 'semola', 'creme caramel'],
+    'Beverages': ['probiótico', 'probiotico', 'uno multifruta', 'bebida lactea'],
+    'Cream': ['crema'],
+    'Ice Cream': ['helado', 'ice cream'],
+}
+
+# Parent category para nuevas categorías de lácteos
+DAIRY_PARENT_SLUG = 'dairy'
+
+
+def get_or_create_category(db: Session, category_name: str) -> Category:
+    """Obtiene una categoría existente o la crea si no existe."""
+    slug = re.sub(r'[^a-z0-9]+', '-', category_name.lower()).strip('-')
+
+    # Buscar categoría existente por nombre o slug (case insensitive)
+    category = db.query(Category).filter(
+        (func.lower(Category.name) == category_name.lower()) |
+        (Category.slug == slug)
+    ).first()
+
+    if not category:
+        # Buscar parent "Dairy & Chilled Food" para categorías de lácteos
+        parent_id = None
+        dairy_categories = ['yogurt', 'milk', 'cheese', 'butter & margarine', 'cream', 'desserts']
+        if category_name.lower() in dairy_categories:
+            dairy_parent = db.query(Category).filter(Category.slug == DAIRY_PARENT_SLUG).first()
+            if dairy_parent:
+                parent_id = dairy_parent.id
+
+        # Crear nueva categoría
+        category = Category(
+            name=category_name,
+            slug=slug,
+            parent_id=parent_id,
+            active=True
+        )
+        db.add(category)
+        db.flush()  # Para obtener el ID sin hacer commit
+        print(f"  [CAT] Nueva categoría creada: {category_name} (parent: {'Dairy' if parent_id else 'None'})")
+
+    return category
+
+
+def detect_category_from_name(product_name: str, db: Session, brand_id: UUID = None) -> Optional[UUID]:
+    """
+    Detecta la categoría de un producto basándose en:
+    1. Productos similares de la misma marca
+    2. Palabras clave en el nombre
+    """
+    product_name_lower = product_name.lower()
+
+    # 1. Buscar productos similares de la misma marca que ya tengan categoría
+    if brand_id:
+        # Extraer primera palabra significativa del producto (ej: "Yogurt", "Leche")
+        first_words = product_name.split()[:2]  # Primeras 2 palabras
+
+        for word in first_words:
+            if len(word) > 3:  # Ignorar palabras muy cortas
+                similar_product = db.query(ProductCatalog).filter(
+                    ProductCatalog.brand_id == brand_id,
+                    ProductCatalog.category_id.isnot(None),
+                    ProductCatalog.name.ilike(f"{word}%")
+                ).first()
+
+                if similar_product:
+                    print(f"  [CAT] Categoría inferida de producto similar: {similar_product.name}")
+                    return similar_product.category_id
+
+    # 2. Mapeo por palabras clave
+    for category_name, keywords in CATEGORY_KEYWORDS.items():
+        for keyword in keywords:
+            if keyword in product_name_lower:
+                category = get_or_create_category(db, category_name)
+                return category.id
+
+    return None
+
+
 @router.get("/brands/search")
 async def search_brand_catalog(
     q: str = Query(..., description="Nombre de la marca a buscar"),
+    create_products: bool = Query(True, description="Crear productos en el catálogo automáticamente"),
     db: Session = Depends(get_db)
 ):
     """
-    Busca productos de una marca en Jumbo.cl
-
-    Por ahora solo navega a Jumbo y realiza la búsqueda.
-    En futuras iteraciones extraerá la lista de productos.
+    Busca productos de una marca en Jumbo.cl y opcionalmente los crea en el catálogo.
 
     Args:
         q: Nombre de la marca (ej: "Soprole", "Nestle")
+        create_products: Si True, crea los productos encontrados en product_catalog
 
     Returns:
-        dict: Estado del scraping y mensaje
+        dict: Estado del scraping, productos encontrados y creados
     """
     print(f"\n=== BÚSQUEDA DE CATÁLOGO POR MARCA ===")
     print(f"Marca: {q}")
@@ -49,7 +137,82 @@ async def search_brand_catalog(
     result = await scrape_jumbo_catalog(q)
 
     print(f"Resultado: {result['status']}")
-    print(f"================================\n")
+
+    # Si el scraping fue exitoso y se deben crear productos
+    if result['status'] == 'success' and create_products and result.get('products'):
+        print(f"\n=== CREANDO PRODUCTOS EN CATÁLOGO ===")
+
+        # Buscar o crear la marca
+        brand = db.query(Brand).filter(Brand.name.ilike(q)).first()
+        brand_id = brand.id if brand else None
+
+        if brand:
+            print(f"Marca encontrada: {brand.name} (ID: {brand.id})")
+        else:
+            print(f"Marca '{q}' no encontrada en BD, productos se crearán sin brand_id")
+
+        created_count = 0
+        skipped_count = 0
+        created_products = []
+
+        for product in result['products']:
+            # Verificar si el producto ya existe (por nombre exacto)
+            existing = db.query(ProductCatalog).filter(
+                ProductCatalog.name == product['name']
+            ).first()
+
+            if existing:
+                print(f"  [SKIP] Ya existe: {product['name']}")
+                skipped_count += 1
+                continue
+
+            # Detectar categoría
+            category_id = detect_category_from_name(product['name'], db, brand_id)
+
+            # Crear el producto
+            new_product = ProductCatalog(
+                name=product['name'],
+                sku=f"JUMBO-{product['jumbo_id']}",  # SKU basado en ID de Jumbo
+                brand_id=brand_id,
+                category_id=category_id,
+                image_url=product.get('image_url'),
+                attributes={
+                    'jumbo_id': product['jumbo_id'],
+                    'jumbo_url': product['url'],
+                    'jumbo_price': product['price'],
+                    'source': 'jumbo_scraper'
+                },
+                active=True
+            )
+
+            db.add(new_product)
+            created_count += 1
+
+            # Obtener nombre de categoría para el log
+            cat_name = None
+            if category_id:
+                cat = db.query(Category).filter(Category.id == category_id).first()
+                cat_name = cat.name if cat else None
+
+            created_products.append({
+                'name': product['name'],
+                'sku': f"JUMBO-{product['jumbo_id']}",
+                'category': cat_name
+            })
+            print(f"  [NEW] Creado: {product['name']} -> Categoría: {cat_name or 'Sin categoría'}")
+
+        # Commit todos los productos
+        db.commit()
+
+        print(f"\n=== RESUMEN ===")
+        print(f"Productos creados: {created_count}")
+        print(f"Productos omitidos (ya existían): {skipped_count}")
+        print(f"================================\n")
+
+        # Agregar info al resultado
+        result['created_count'] = created_count
+        result['skipped_count'] = skipped_count
+        result['created_products'] = created_products
 
     return result
 
