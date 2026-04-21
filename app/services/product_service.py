@@ -217,11 +217,12 @@ class ProductService:
                 :scraped_at
             FROM products_catalog pc
             WHERE pc.id = :catalog_id
-            ON CONFLICT (catalog_id, store_id) 
-            DO UPDATE SET 
+            ON CONFLICT (catalog_id, store_id)
+            DO UPDATE SET
                 url = EXCLUDED.url,
                 current_price = EXCLUDED.current_price,
                 last_scraped_at = EXCLUDED.last_scraped_at,
+                category_id = COALESCE(EXCLUDED.category_id, products.category_id),
                 updated_at = NOW()
             RETURNING id, catalog_id, store_id, category_id, url, current_price, created_at, updated_at, last_scraped_at
         """)
@@ -381,5 +382,43 @@ class ProductService:
         
         new_store = ProductService.create_store(db, store_name, base_url)
         print(f"✅ Tienda creada (inactiva): {new_store['name']} - ID: {new_store['id']}")
-        
+
         return new_store
+
+    @staticmethod
+    def create_catalog_product(
+        db: Session,
+        name: str,
+        category_id: Optional[UUID] = None,
+        brand_id: Optional[UUID] = None,
+    ) -> dict:
+        """
+        Crea un producto en products_catalog cuando no se encuentra por búsqueda.
+        brand_id y category_id son opcionales — se pueden completar desde el admin después.
+        """
+        query = text("""
+            INSERT INTO products_catalog (name, brand_id, category_id, active)
+            VALUES (:name, :brand_id, :category_id, true)
+            ON CONFLICT DO NOTHING
+            RETURNING id, name, brand_id, category_id
+        """)
+        result = db.execute(query, {
+            "name": name,
+            "brand_id": str(brand_id) if brand_id else None,
+            "category_id": str(category_id) if category_id else None,
+        }).fetchone()
+        db.commit()
+
+        if not result:
+            # Si hubo conflicto, buscar el existente
+            existing = db.execute(
+                text("SELECT id, name, brand_id, category_id FROM products_catalog WHERE name = :name"),
+                {"name": name}
+            ).fetchone()
+            return {"id": existing.id, "name": existing.name,
+                    "brand_id": existing.brand_id, "category_id": existing.category_id,
+                    "brand_name": None, "category_name": None, "sku": None}
+
+        return {"id": result.id, "name": result.name,
+                "brand_id": result.brand_id, "category_id": result.category_id,
+                "brand_name": None, "category_name": None, "sku": None}

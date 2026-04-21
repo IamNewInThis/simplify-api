@@ -7,6 +7,7 @@ from sqlalchemy import text
 from app.core.database import get_db
 from app.schemas.product import ProductSearchResult, ProductWithPrice
 from app.services.product_service import ProductService
+from app.api.brands import detect_category_from_name
 import sys
 import os
 from decimal import Decimal
@@ -80,17 +81,31 @@ async def search_product(
     catalog_product = ProductService.search_catalog_by_name(db, q)
     
     if not catalog_product:
-        print(f"❌ Producto no encontrado en catálogo")
-        return ProductSearchResult(
-            catalog_id="00000000-0000-0000-0000-000000000000",
-            catalog_name=q,
-            products=[],
-            total_stores=0,
-            was_scraped=False
+        print(f"⚠️  Producto no encontrado en catálogo, creando entrada automática...")
+        detected_category = detect_category_from_name(q, db)
+        catalog_product = ProductService.create_catalog_product(
+            db, name=q, category_id=detected_category
         )
+        print(f"✅ Creado en catálogo: {catalog_product['name']}")
     
     print(f"✅ Encontrado en catálogo: {catalog_product['name']}")
-    
+
+    # Si el catálogo no tiene categoría, detectarla y persistirla
+    if not catalog_product.get('category_id'):
+        detected = detect_category_from_name(
+            catalog_product['name'], db, catalog_product.get('brand_id')
+        )
+        if detected:
+            db.execute(
+                text("UPDATE products_catalog SET category_id = :cat WHERE id = :id"),
+                {"cat": str(detected), "id": str(catalog_product['id'])}
+            )
+            db.commit()
+            catalog_product['category_id'] = detected
+            print(f"✅ Categoría detectada y guardada: {detected}")
+        else:
+            print(f"⚠️  No se pudo detectar categoría para: {catalog_product['name']}")
+
     # 2. Buscar precios scrapeados
     existing_products = ProductService.get_products_by_catalog_id(
         db, 
